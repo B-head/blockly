@@ -306,6 +306,22 @@ export class VariableMap
    */
   deleteVariable(variable: IVariableModel<IVariableState>) {
     const uses = getVariableUsesById(this.workspace, variable.getId());
+    // Pre-collect parent connections of any shadow uses. Disposing a shadow
+    // does not by itself trigger respawn (the disconnect path skips
+    // respawn for shadow children), so we need to drive the restoration
+    // explicitly. We restore the shadow template after the cascade so that
+    // its FieldVariable lazily re-creates a fresh variable with the same id,
+    // matching how a non-shadow variables_get would auto-create on load.
+    const explicitRespawnTargets: AnyDuringMigration[] = [];
+    for (let i = 0; i < uses.length; i++) {
+      const use = uses[i] as AnyDuringMigration;
+      if (!use.isShadow()) continue;
+      const parentConn =
+        (use.outputConnection && use.outputConnection.targetConnection) ||
+        (use.previousConnection && use.previousConnection.targetConnection);
+      if (parentConn) explicitRespawnTargets.push(parentConn);
+    }
+
     let existingGroup = '';
     if (!this.potentialMap) {
       existingGroup = eventUtils.getGroup();
@@ -313,6 +329,12 @@ export class VariableMap
         eventUtils.setGroup(true);
       }
     }
+    // Suppress shadow respawn for the duration of the cascade. Without this,
+    // disposing a non-shadow use whose parent input has a shadow template
+    // would cause the parent to immediately respawn a new shadow, whose
+    // FieldVariable would re-create the very variable we're deleting.
+    const previousSuppress = this.workspace.suppressShadowRespawn;
+    this.workspace.suppressShadowRespawn = true;
     try {
       for (let i = 0; i < uses.length; i++) {
         if (uses[i].isDeadOrDying()) continue;
@@ -329,6 +351,38 @@ export class VariableMap
         this.variableMap.delete(variable.getType());
       }
     } finally {
+      // Restore shadows now that the variable has been removed. This happens
+      // while the event group is still open, so the shadow restorations
+      // (and any side-effect VarCreate events from their FieldVariables) are
+      // bundled with the deletion under a single undo. We only drain at the
+      // outermost suppression scope to avoid losing pending entries from a
+      // nested cascade.
+      if (!previousSuppress) {
+        // Suppression-deferred respawns (non-shadow uses whose parent has a
+        // shadow template) plus the explicit shadow-use parents collected
+        // above. Order: deferred first, then explicit; both are processed
+        // through the same gating logic.
+        const deferred = this.workspace.pendingShadowRespawns;
+        this.workspace.pendingShadowRespawns = [];
+        this.workspace.suppressShadowRespawn = false;
+        const toRespawn: AnyDuringMigration[] = (
+          deferred as AnyDuringMigration[]
+        ).concat(explicitRespawnTargets);
+        for (let i = 0; i < toRespawn.length; i++) {
+          const conn = toRespawn[i];
+          // Skip connections whose owner died, who were themselves disposed,
+          // or who acquired a new child between suppression and flush.
+          if (
+            conn.disposed ||
+            conn.getSourceBlock().isDeadOrDying() ||
+            conn.targetBlock()
+          ) {
+            continue;
+          }
+          conn.respawnShadow_();
+        }
+      }
+      this.workspace.suppressShadowRespawn = previousSuppress;
       if (!this.potentialMap) {
         eventUtils.setGroup(existingGroup);
       }

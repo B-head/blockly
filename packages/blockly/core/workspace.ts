@@ -18,6 +18,7 @@ import type {Block} from './block.js';
 import type {BlocklyOptions} from './blockly_options.js';
 import {WorkspaceComment} from './comments/workspace_comment.js';
 import * as common from './common.js';
+import type {Connection} from './connection.js';
 import type {ConnectionDB} from './connection_db.js';
 import type {Abstract} from './events/events_abstract.js';
 import * as eventUtils from './events/utils.js';
@@ -94,6 +95,27 @@ export class Workspace {
    * @internal
    */
   isClearing = false;
+
+  /**
+   * When true, parent connections will not respawn shadow children that have
+   * just been disposed. This is set during cascading dispose operations
+   * (e.g. variable deletion) where respawning would re-introduce references
+   * to the very thing being torn down, causing inconsistent state and event
+   * ordering. Suppressed connections are queued in `pendingShadowRespawns`
+   * and flushed once the cascade completes.
+   *
+   * @internal
+   */
+  suppressShadowRespawn = false;
+
+  /**
+   * Connections whose shadow respawn was suppressed during a cascading
+   * dispose. Drained after the cascade so that template shadow blocks can be
+   * restored once the workspace is back in a consistent state.
+   *
+   * @internal
+   */
+  pendingShadowRespawns: Connection[] = [];
 
   /**
    * Maximum number of undo events in stack. `0` turns off undo, `Infinity`
