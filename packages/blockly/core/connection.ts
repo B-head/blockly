@@ -345,6 +345,14 @@ export class Connection {
    */
   protected respawnShadow_() {
     // Have to keep respawnShadow_ for backwards compatibility.
+    const workspace = this.getSourceBlock().workspace;
+    if (workspace.suppressShadowRespawn) {
+      // A cascading dispose (e.g. variable deletion) is in progress.
+      // Defer the respawn so the orchestrating operation can drain it
+      // after the cascade has finished mutating shared state.
+      workspace.pendingShadowRespawns.push(this);
+      return;
+    }
     this.createShadowBlock(true);
   }
 

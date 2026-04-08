@@ -139,6 +139,7 @@
           'toolbox-categories-typed-variables',
           'toolbox-simple',
           'toolbox-test-blocks',
+          'toolbox-shadow-variables',
         ];
         var toolboxSuffix = getToolboxSuffix();
         document.forms.options.elements.toolbox.selectedIndex =
@@ -548,6 +549,7 @@
         </option>
         <option value="simple">Simple</option>
         <option value="test-blocks">Test Blocks</option>
+        <option value="shadow-variables">Shadow Variables</option>
       </select>
     </form>
     <p>
@@ -1271,6 +1273,139 @@
         name="Variables"
         categorystyle="variable_category"
         custom="VARIABLE_DYNAMIC"></category>
+      <category
+        name="Functions"
+        categorystyle="procedure_category"
+        custom="PROCEDURE"></category>
+    </xml>
+
+    <!-- toolbox-shadow-variables exercises the patch that allows
+  variables_get to be used as a shadow block. It mirrors toolbox-categories
+  but replaces several numeric shadows with shadow variables_get blocks
+  pointing to the variable "item". The variable is created on demand by
+  Blockly the first time the toolbox is rendered (the same auto-create
+  path used for the standard non-shadow variables_get from a category). -->
+    <xml
+      xmlns="https://developers.google.com/blockly/xml"
+      id="toolbox-shadow-variables"
+      style="display: none">
+      <category name="Shadow Demo" categorystyle="variable_category">
+        <label text="Shadow variables_get:" web-class="ioLabel"></label>
+        <block type="text_print">
+          <value name="TEXT">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="math_arithmetic">
+          <field name="OP">ADD</field>
+          <value name="A">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+          <value name="B">
+            <shadow type="math_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="logic_compare">
+          <value name="A">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+          <value name="B">
+            <shadow type="math_number">
+              <field name="NUM">0</field>
+            </shadow>
+          </value>
+        </block>
+      </category>
+      <category name="Logic" categorystyle="logic_category">
+        <block type="controls_if"></block>
+        <block type="logic_compare"></block>
+        <block type="logic_operation"></block>
+        <block type="logic_negate"></block>
+        <block type="logic_boolean"></block>
+        <block type="logic_ternary"></block>
+      </category>
+      <category name="Loops" categorystyle="loop_category">
+        <block type="controls_repeat_ext">
+          <value name="TIMES">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="controls_for">
+          <value name="FROM">
+            <shadow type="math_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+          <value name="TO">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+          <value name="BY">
+            <shadow type="math_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+      </category>
+      <category name="Math" categorystyle="math_category">
+        <block type="math_number" gap="32">
+          <field name="NUM">123</field>
+        </block>
+        <block type="math_arithmetic">
+          <value name="A">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+          <value name="B">
+            <shadow type="math_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="math_single">
+          <value name="NUM">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="math_round">
+          <value name="NUM">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+        </block>
+      </category>
+      <category name="Lists" categorystyle="list_category">
+        <block type="lists_create_with"></block>
+        <block type="lists_repeat">
+          <value name="NUM">
+            <shadow type="variables_get">
+              <field name="VAR" id="item_id">item</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="lists_length"></block>
+        <block type="lists_isEmpty"></block>
+      </category>
+      <sep></sep>
+      <category
+        name="Variables"
+        categorystyle="variable_category"
+        custom="VARIABLE"></category>
       <category
         name="Functions"
         categorystyle="procedure_category"

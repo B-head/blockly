@@ -19,12 +19,15 @@ import './events/events_var_rename.js';
 import type {Block} from './block.js';
 import {EventType} from './events/type.js';
 import * as eventUtils from './events/utils.js';
+import {FieldVariable} from './field_variable.js';
 import type {IVariableMap} from './interfaces/i_variable_map.js';
 import {IVariableModel, IVariableState} from './interfaces/i_variable_model.js';
 import {Names} from './names.js';
 import * as registry from './registry.js';
+import type {State as BlockState} from './serialization/blocks.js';
 import * as deprecation from './utils/deprecation.js';
 import * as idGenerator from './utils/idgenerator.js';
+import * as Variables from './variables.js';
 import {deleteVariable, getVariableUsesById} from './variables.js';
 import type {Workspace} from './workspace.js';
 
@@ -305,7 +308,48 @@ export class VariableMap
    * @param variable Variable to delete.
    */
   deleteVariable(variable: IVariableModel<IVariableState>) {
-    const uses = getVariableUsesById(this.workspace, variable.getId());
+    const allUses = getVariableUsesById(this.workspace, variable.getId());
+
+    // For each shadow use we collect Case 1 field resets only. Case 2
+    // (parent template references the variable being deleted) is currently
+    // *left untouched*: the shadow stays attached to its parent and its
+    // FieldVariable retains a reference to the now-orphaned variable model.
+    // This is a deliberate prototype limitation - see the project memory
+    // for the constraint that blocks a clean Case 2 implementation.
+    const case1Resets: Array<{
+      field: FieldVariable;
+      templateField: AnyDuringMigration;
+    }> = [];
+    const remainingUses: Block[] = [];
+    for (let i = 0; i < allUses.length; i++) {
+      const use = allUses[i];
+      if (!use.isShadow()) {
+        remainingUses.push(use);
+        continue;
+      }
+      const classified = this.classifyShadowUse(use, variable.getId());
+      if (!classified) {
+        // No parent template / no field name - fall through to dispose.
+        remainingUses.push(use);
+        continue;
+      }
+      let anyCase2 = false;
+      for (const entry of classified) {
+        if (entry.case2) {
+          anyCase2 = true;
+        } else {
+          case1Resets.push({
+            field: entry.field,
+            templateField: entry.templateField,
+          });
+        }
+      }
+      // If a shadow has any Case 2 field we leave the whole shadow alone.
+      // (A mixed shadow would need more careful handling than the prototype
+      // attempts to provide; in practice variables_get only has one field.)
+      if (anyCase2) continue;
+    }
+
     let existingGroup = '';
     if (!this.potentialMap) {
       existingGroup = eventUtils.getGroup();
@@ -313,11 +357,32 @@ export class VariableMap
         eventUtils.setGroup(true);
       }
     }
+    // Suppress shadow respawn for the duration of the cascade. Without this,
+    // disposing a non-shadow use whose parent input has a shadow template
+    // would cause the parent to immediately respawn a new shadow, whose
+    // FieldVariable would re-create the very variable being deleted.
+    const previousSuppress = this.workspace.suppressShadowRespawn;
+    this.workspace.suppressShadowRespawn = true;
     try {
-      for (let i = 0; i < uses.length; i++) {
-        if (uses[i].isDeadOrDying()) continue;
+      // Case 1: reset shadow fields to their template defaults.
+      // BlockChange events fire inside the event group so they undo cleanly.
+      for (let i = 0; i < case1Resets.length; i++) {
+        const {field, templateField} = case1Resets[i];
+        // Make sure the template's variable exists on the workspace before
+        // we point the field at it; otherwise doClassValidation_ would reject
+        // the new id.
+        const tmpl = Variables.getOrCreateVariablePackage(
+          this.workspace,
+          templateField['id'],
+          templateField['name'],
+          templateField['type'] || '',
+        );
+        field.setValue(tmpl.getId());
+      }
 
-        uses[i].dispose(true);
+      for (let i = 0; i < remainingUses.length; i++) {
+        if (remainingUses[i].isDeadOrDying()) continue;
+        remainingUses[i].dispose(true);
       }
       const variables = this.variableMap.get(variable.getType());
       if (!variables || !variables.has(variable.getId())) return;
@@ -329,10 +394,88 @@ export class VariableMap
         this.variableMap.delete(variable.getType());
       }
     } finally {
+      // Drain deferred respawns now that the variable has been removed.
+      // Done while the event group is still open so the restorations
+      // (and any side-effect VarCreate events from their FieldVariables)
+      // are bundled with the deletion under a single undo.
+      if (!previousSuppress) {
+        const deferred = this.workspace.pendingShadowRespawns;
+        this.workspace.pendingShadowRespawns = [];
+        this.workspace.suppressShadowRespawn = false;
+        for (let i = 0; i < deferred.length; i++) {
+          const conn = deferred[i] as AnyDuringMigration;
+          if (
+            conn.disposed ||
+            conn.getSourceBlock().isDeadOrDying() ||
+            conn.targetBlock()
+          ) {
+            continue;
+          }
+          conn.respawnShadow_();
+        }
+      }
+      this.workspace.suppressShadowRespawn = previousSuppress;
       if (!this.potentialMap) {
         eventUtils.setGroup(existingGroup);
       }
     }
+  }
+
+  /**
+   * Classify each FieldVariable on a shadow use that references the variable
+   * being deleted. Returns null if any such field cannot be resolved against
+   * the parent template (the caller will then dispose the shadow as a
+   * fallback).
+   *
+   * Each entry's `case2` flag indicates whether the parent template's
+   * default for that field is the variable being deleted (Case 2 - needs
+   * regeneration) or some other variable (Case 1 - direct reset).
+   */
+  private classifyShadowUse(
+    use: Block,
+    deletedVariableId: string,
+  ): Array<{
+    field: FieldVariable;
+    templateField: AnyDuringMigration;
+    case2: boolean;
+  }> | null {
+    const useAny = use as AnyDuringMigration;
+    const parentConn =
+      (useAny.outputConnection && useAny.outputConnection.targetConnection) ||
+      (useAny.previousConnection && useAny.previousConnection.targetConnection);
+    if (!parentConn) return null;
+    // Use the stored shadowState reference (NOT returnCurrent) so that any
+    // mutation we make later affects the connection's stored template.
+    const templateState = parentConn.getShadowState
+      ? (parentConn.getShadowState() as BlockState | null)
+      : null;
+    if (!templateState || !templateState.fields) return null;
+
+    const entries: Array<{
+      field: FieldVariable;
+      templateField: AnyDuringMigration;
+      case2: boolean;
+    }> = [];
+    for (let i = 0; i < use.inputList.length; i++) {
+      const fieldRow = use.inputList[i].fieldRow;
+      for (let j = 0; j < fieldRow.length; j++) {
+        const field = fieldRow[j];
+        if (!(field instanceof FieldVariable)) continue;
+        if (field.getVariable()?.getId() !== deletedVariableId) continue;
+        const fieldName = field.name;
+        if (!fieldName) return null;
+        const tmplField = (templateState.fields as AnyDuringMigration)[
+          fieldName
+        ];
+        if (!tmplField || !tmplField['id']) return null;
+        entries.push({
+          field,
+          templateField: tmplField,
+          case2: tmplField['id'] === deletedVariableId,
+        });
+      }
+    }
+    return entries.length > 0 ? entries : null;
   }
 
   /**
